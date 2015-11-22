@@ -38,6 +38,8 @@ class HipchatOptionsForm(forms.Form):
     include_project_name = forms.BooleanField(help_text='Include project name in message.', required=False)
     endpoint = forms.CharField(help_text="Custom API endpoint to send notifications to.", required=False,
                                widget=forms.TextInput(attrs={'placeholder': DEFAULT_ENDPOINT}))
+    delay = forms.FloatField(help_text="Delay between showing the same alert (seconds)", required=False,
+                             min_value=60.0, initial=3600.0)
 
 
 class HipchatMessage(NotifyPlugin):
@@ -98,7 +100,8 @@ class HipchatMessage(NotifyPlugin):
                 room=room,
                 message='[%(level)s]%(project_name)s %(message)s [<a href="%(link)s">view</a>]' % {
                     'level': escape(level),
-                    'project_name': (' <strong>%s</strong>' % escape(project.name)).encode('utf-8') if include_project_name else '',
+                    'project_name': ((' <strong>%s</strong>' % escape(project.name)).encode('utf-8')
+                                     if include_project_name else ''),
                     'message': escape(event.error()),
                     'link': escape(link),
                 },

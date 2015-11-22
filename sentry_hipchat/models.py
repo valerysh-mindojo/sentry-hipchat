@@ -5,6 +5,7 @@ sentry_hipchat.models
 :copyright: (c) 2011 by Linovia, see AUTHORS for more details.
 :license: BSD, see LICENSE for more details.
 """
+from datetime import datetime
 
 from django import forms
 from django.conf import settings
@@ -29,6 +30,7 @@ COLORS = {
 }
 
 DEFAULT_ENDPOINT = "https://api.hipchat.com/v1/rooms/message"
+DEFAULT_DELAY = 3600.0  # seconds
 
 
 class HipchatOptionsForm(forms.Form):
@@ -57,6 +59,7 @@ class HipchatMessage(NotifyPlugin):
     conf_key = 'hipchat'
     project_conf_form = HipchatOptionsForm
     timeout = getattr(settings, 'SENTRY_HIPCHAT_TIMEOUT', 3)
+    notify_delay_mapping = {}
 
     def is_configured(self, project):
         return all((self.get_option(k, project) for k in ('room', 'token')))
@@ -92,22 +95,28 @@ class HipchatMessage(NotifyPlugin):
         level = group.get_level_display().upper()
         link = group.get_absolute_url()
         endpoint = self.get_option('endpoint', project) or DEFAULT_ENDPOINT
+        delay = self.get_option('delay', project) or DEFAULT_DELAY
 
         if token and room:
-            self.send_payload(
-                endpoint=endpoint,
-                token=token,
-                room=room,
-                message='[%(level)s]%(project_name)s %(message)s [<a href="%(link)s">view</a>]' % {
-                    'level': escape(level),
-                    'project_name': ((' <strong>%s</strong>' % escape(project.name)).encode('utf-8')
-                                     if include_project_name else ''),
-                    'message': escape(event.error()),
-                    'link': escape(link),
-                },
-                notify=notify,
-                color=COLORS.get(level, 'purple'),
-            )
+            if (
+                    (group.id not in self.notify_delay_mapping) or
+                    (datetime.utcnow() - self.notify_delay_mapping[group.id]).total_seconds() >= delay
+            ):
+                self.notify_delay_mapping[group.id] = datetime.utcnow()
+                self.send_payload(
+                    endpoint=endpoint,
+                    token=token,
+                    room=room,
+                    message='[%(level)s]%(project_name)s %(message)s [<a href="%(link)s">view</a>]' % {
+                        'level': escape(level),
+                        'project_name': ((' <strong>%s</strong>' % escape(project.name)).encode('utf-8')
+                                        if include_project_name else ''),
+                        'message': escape(event.error()),
+                        'link': escape(link),
+                    },
+                    notify=notify,
+                    color=COLORS.get(level, 'purple'),
+                )
 
     def send_payload(self, endpoint, token, room, message, notify, color='red'):
         values = {

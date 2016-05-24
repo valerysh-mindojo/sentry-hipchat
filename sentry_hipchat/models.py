@@ -12,6 +12,7 @@ from django.conf import settings
 from django.utils.html import escape
 
 from sentry.plugins.bases.notify import NotifyPlugin
+from sentry.cache.redis import RedisCache
 
 import sentry_hipchat
 
@@ -59,7 +60,10 @@ class HipchatMessage(NotifyPlugin):
     conf_key = 'hipchat'
     project_conf_form = HipchatOptionsForm
     timeout = getattr(settings, 'SENTRY_HIPCHAT_TIMEOUT', 3)
-    notify_delay_mapping = {}
+
+    def __init__(self):
+        super(HipchatMessage, self).__init__()
+        self.delay_cache = RedisCache()
 
     def is_configured(self, project):
         return all((self.get_option(k, project) for k in ('room', 'token')))
@@ -68,28 +72,34 @@ class HipchatMessage(NotifyPlugin):
         project = alert.project
         token = self.get_option('token', project)
         room = self.get_option('room', project)
+        if not (token and room):
+            return
         notify = self.get_option('notify', project) or False
         include_project_name = self.get_option('include_project_name', project) or False
         endpoint = self.get_option('endpoint', project) or DEFAULT_ENDPOINT
 
-        if token and room:
-            self.send_payload(
-                endpoint=endpoint,
-                token=token,
-                room=room,
-                message='[ALERT]%(project_name)s %(message)s %(link)s' % {
-                    'project_name': (' <strong>%s</strong>' % escape(project.name)) if include_project_name else '',
-                    'message': escape(alert.message),
-                    'link': alert.get_absolute_url(),
-                },
-                notify=notify,
-                color=COLORS['ALERT'],
-            )
+        self.send_payload(
+            endpoint=endpoint,
+            token=token,
+            room=room,
+            message='[ALERT]%(project_name)s %(message)s %(link)s' % {
+                'project_name': (' <strong>%s</strong>' % escape(project.name)) if include_project_name else '',
+                'message': escape(alert.message),
+                'link': alert.get_absolute_url(),
+            },
+            notify=notify,
+            color=COLORS['ALERT'],
+        )
 
     def notify_users(self, group, event, fail_silently=False):
         project = event.project
         token = self.get_option('token', project)
         room = self.get_option('room', project)
+        if not (token and room):
+            return
+        delay_cache_key = "delay_{}".format(group.id)
+        if self.delay_cache.get(delay_cache_key):
+            return  # the cache hasn't expired, so not sending again
         notify = self.get_option('notify', project) or False
         include_project_name = self.get_option('include_project_name', project) or False
         level = group.get_level_display().upper()
@@ -97,26 +107,23 @@ class HipchatMessage(NotifyPlugin):
         endpoint = self.get_option('endpoint', project) or DEFAULT_ENDPOINT
         delay = self.get_option('delay', project) or DEFAULT_DELAY
 
-        if token and room:
-            if (
-                    (group.id not in self.notify_delay_mapping) or
-                    (datetime.utcnow() - self.notify_delay_mapping[group.id]).total_seconds() >= delay
-            ):
-                self.notify_delay_mapping[group.id] = datetime.utcnow()
-                self.send_payload(
-                    endpoint=endpoint,
-                    token=token,
-                    room=room,
-                    message='[%(level)s]%(project_name)s %(message)s [<a href="%(link)s">view</a>]' % {
-                        'level': escape(level),
-                        'project_name': ((' <strong>%s</strong>' % escape(project.name)).encode('utf-8')
-                                        if include_project_name else ''),
-                        'message': escape(event.error()),
-                        'link': escape(link),
-                    },
-                    notify=notify,
-                    color=COLORS.get(level, 'purple'),
-                )
+        self.send_payload(
+            endpoint=endpoint,
+            token=token,
+            room=room,
+            message='[%(level)s]%(project_name)s %(message)s [<a href="%(link)s">view</a>]' % {
+                'level': escape(level),
+                'project_name': ((' <strong>%s</strong>' % escape(project.name)).encode('utf-8')
+                                if include_project_name else ''),
+                'message': escape(event.error()),
+                'link': escape(link),
+            },
+            notify=notify,
+            color=COLORS.get(level, 'purple'),
+        )
+
+        # put a marker no not send the same message within `delay` period
+        self.delay_cache.set(delay_cache_key, True, delay)
 
     def send_payload(self, endpoint, token, room, message, notify, color='red'):
         values = {
